@@ -1,8 +1,7 @@
 from serial import Serial
 from threading import Thread
 from queue import Queue
-from src.scan_hardware import get_zigbee_ports
-
+from scan_hardware import get_zigbee_ports
 
 START_BYTE = 0x7E
 RECEIVE_BYTE = 0x90
@@ -11,7 +10,6 @@ AT_RESPONSE_BYTE = 0x88
 UNKNOWN_BYTE = 0xFF
 TRANSMISSION_BYTE = 0x10
 TRANSMISSION_STATUS = 0x8B
-
 
 ESCAPE_BYTE = 0x7D
 XON_BYTE = 0x11
@@ -37,7 +35,7 @@ PacketTypes = {
     AT_RESPONSE_BYTE: lambda b: {
         "type": "AT",
         "command": b[4:6].decode(),
-        "payload": b[6:-1].decode(),
+        "payload": b[6:-1],
         "lqi": b[-1]
     },  # AT Response
     UNKNOWN_BYTE: lambda b: {
@@ -49,7 +47,7 @@ PacketTypes = {
 def compute_checksum(msg):
     total = sum(msg)
     truncation = total & 0xFF
-    checksum = 0xFF - truncation    
+    checksum = 0xFF - truncation
     return checksum.to_bytes(1, 'big')
 
 
@@ -66,8 +64,9 @@ def send_at_command(device, cmd):
     encoded_msg = build_message(msg)
     device.write(encoded_msg)
 
+
 def query_at_values(device):
-     device.write(build_message(AT_COMMAND_BYTE.to_bytes(1, 'big')))
+    device.write(build_message(AT_COMMAND_BYTE.to_bytes(1, 'big')))
 
 
 def send_transmission(device, address_16bit, message):
@@ -76,7 +75,7 @@ def send_transmission(device, address_16bit, message):
     NUM_HOPS = b'\x00'
     OPTIONS = b'\x00'
     msg = TRANSMISSION_BYTE.to_bytes(1, 'big') + FRAME_ID.to_bytes(1, 'big') + address_64bit + address_16bit + \
-              NUM_HOPS + OPTIONS + message.encode()
+          NUM_HOPS + OPTIONS + message.encode()
     encoded_msg = build_message(msg)
     device.write(encoded_msg)
 
@@ -110,7 +109,7 @@ def polling_thread(dev, incoming, outgoing):
                 waiting_message = parsed_message
             elif parsed_message["type"] == "AT" and parsed_message["command"] != "DB":
                 pass
-                #print("Received command message: " + parsed_message["command"] + ", " + parsed_message["payload"])
+                # print("Received command message: " + parsed_message["command"] + ", " + parsed_message["payload"])
             elif parsed_message["type"] == "AT" and parsed_message["command"] == "DB":
                 waiting_message["rssi"] = int.from_bytes(parsed_message["payload"], byteorder='big')
                 incoming.put(waiting_message)
@@ -127,6 +126,15 @@ if __name__ == "__main__":
     if len(zigbee_devices) == 0:
         raise Exception("No Zigbee sensors connected.")
 
+    print("Available devices: ")
+    for i, d in enumerate(zigbee_devices):
+        print(str(i) + ")  " + d)
+    print("")
+    dnum = -1
+    while dnum < 0 or dnum > len(zigbee_devices) - 1:
+        resp = input("Select a device: ")
+        dnum = int(resp) if resp.isnumeric() else -1
+
     dev_path = zigbee_devices[0]
     port = Serial(dev_path, 9600)
 
@@ -137,7 +145,6 @@ if __name__ == "__main__":
     t = Thread(target=polling_thread, args=(port, inbound, outbound,))
 
     t.start()
-
 
     OTHER_ZIGBEE = b'\xc4\x7f'
     go = True
