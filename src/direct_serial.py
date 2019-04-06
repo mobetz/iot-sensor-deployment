@@ -1,10 +1,12 @@
 from serial import Serial
 from threading import Thread
 from queue import Queue
+from src.scan_hardware import get_zigbee_ports
 
 
 START_BYTE = 0x7E
 RECEIVE_BYTE = 0x90
+AT_COMMAND_BYTE = 0x08
 AT_RESPONSE_BYTE = 0x88
 UNKNOWN_BYTE = 0xFF
 TRANSMISSION_BYTE = 0x10
@@ -34,8 +36,8 @@ PacketTypes = {
     },  # AT Response
     AT_RESPONSE_BYTE: lambda b: {
         "type": "AT",
-        "command": b[4:6],
-        "payload": b[6:-1],
+        "command": b[4:6].decode(),
+        "payload": b[6:-1].decode(),
         "lqi": b[-1]
     },  # AT Response
     UNKNOWN_BYTE: lambda b: {
@@ -59,9 +61,13 @@ def build_message(msg):
 
 
 def send_at_command(device, cmd):
-    msg = b'\x08\x01' + cmd.encode()
+    PACKET_ID = b'\x01'
+    msg = AT_COMMAND_BYTE.to_bytes(1, 'big') + PACKET_ID + cmd.encode()
     encoded_msg = build_message(msg)
     device.write(encoded_msg)
+
+def query_at_values(device):
+     device.write(build_message(AT_COMMAND_BYTE.to_bytes(1, 'big')))
 
 
 def send_transmission(device, address_16bit, message):
@@ -87,16 +93,25 @@ def parse_message(barray):
         return PacketTypes[UNKNOWN_BYTE](barray)
 
 
+def set_name_and_pan(device, name, pan):
+    send_at_command(device, "ID " + pan)
+    send_at_command(device, "NI " + name)
+
+
 def polling_thread(dev, incoming, outgoing):
     in_progress = b''
     waiting_message = {}
+
     while True:
         d = dev.read()
         if d == START_BYTE.to_bytes(1, 'big'):
             parsed_message = parse_message(in_progress)
             if parsed_message["type"] == "receive":
                 waiting_message = parsed_message
-            elif parsed_message["type"] == "AT":
+            elif parsed_message["type"] == "AT" and parsed_message["command"] != "DB":
+                pass
+                #print("Received command message: " + parsed_message["command"] + ", " + parsed_message["payload"])
+            elif parsed_message["type"] == "AT" and parsed_message["command"] == "DB":
                 waiting_message["rssi"] = int.from_bytes(parsed_message["payload"], byteorder='big')
                 incoming.put(waiting_message)
                 print("Received message: " + str(waiting_message))
@@ -108,16 +123,27 @@ def polling_thread(dev, incoming, outgoing):
 
 
 if __name__ == "__main__":
-    port = Serial("COM5", 9600, timeout=0.5)
+    zigbee_devices = get_zigbee_ports()
+    if len(zigbee_devices) == 0:
+        raise Exception("No Zigbee sensors connected.")
+
+    dev_path = zigbee_devices[0]
+    port = Serial(dev_path, 9600)
+
+    set_name_and_pan(port, "test_device", "5555")
+
     inbound = Queue()
     outbound = Queue()
     t = Thread(target=polling_thread, args=(port, inbound, outbound,))
+
     t.start()
+
 
     OTHER_ZIGBEE = b'\xc4\x7f'
     go = True
     while go:
         text = input("Enter a message:")
+
         go = text != ".quit"
         if go:
             send_transmission(port, OTHER_ZIGBEE, text)
