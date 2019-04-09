@@ -10,6 +10,8 @@ AT_RESPONSE_BYTE = 0x88
 UNKNOWN_BYTE = 0xFF
 TRANSMISSION_BYTE = 0x10
 TRANSMISSION_STATUS = 0x8B
+REMOTE_AT_REQ_BYTE = 0x17
+REMOTE_AT_RESP_BYTE = 0x97
 
 ESCAPE_BYTE = 0x7D
 XON_BYTE = 0x11
@@ -34,10 +36,21 @@ PacketTypes = {
     },  # AT Response
     AT_RESPONSE_BYTE: lambda b: {
         "type": "AT",
-        "command": b[4:6].decode(),
-        "payload": b[6:-1],
+        "frame_id": b[4],
+        "command": b[5:7].decode(),
+        "payload": b[7:-1],
         "lqi": b[-1]
     },  # AT Response
+    REMOTE_AT_RESP_BYTE: lambda b: {
+        "type": "REMOTE_AT",
+        "frame_id": b[4],
+        "full_addr": ':'.join('%02x' % b for b in b[5:13]),
+        "short_addr": ':'.join('%02x' % d for d in b[13:15]),
+        "command": b[15:17].decode(),
+        "status_code": b[17],
+        "payload": b[18:-1],
+        "lqi": b[-1]
+    },
     UNKNOWN_BYTE: lambda b: {
         "type": "unknown"
     }
@@ -65,10 +78,6 @@ def send_at_command(device, cmd):
     device.write(encoded_msg)
 
 
-def query_at_values(device):
-    device.write(build_message(AT_COMMAND_BYTE.to_bytes(1, 'big')))
-
-
 def send_transmission(device, address_16bit, message):
     FRAME_ID = 1
     address_64bit = b'\xff\xff\xff\xff\xff\xff\xff\xff'
@@ -80,10 +89,20 @@ def send_transmission(device, address_16bit, message):
     device.write(encoded_msg)
 
 
+def send_remote_at_command(device, address_16bit, message):
+    FRAME_ID = 1
+    address_64bit = b'\xff\xff\xff\xff\xff\xff\xff\xff'
+    OPTIONS = b'\x00'
+    msg = REMOTE_AT_REQ_BYTE.to_bytes(1, 'big') + FRAME_ID.to_bytes(1, 'big') + address_64bit + address_16bit + \
+          OPTIONS + message.encode()
+    encoded_msg = build_message(msg)
+    device.write(encoded_msg)
+
+
 def parse_message(barray):
     packet_type = 0xFF
     if len(barray) >= 3:
-        packet_type = barray[2]
+        packet_type = barray[3]
 
     if packet_type in PacketTypes:
         return PacketTypes[packet_type](barray)
@@ -97,31 +116,41 @@ def set_name_and_pan(device, name, pan):
     send_at_command(device, "NI " + name)
 
 
-def polling_thread(dev, incoming, outgoing):
+def polling_thread(dev, received, to_send):
     in_progress = b''
     waiting_message = {}
+    bytes_left = 999
 
     while True:
         d = dev.read()
-        if d == START_BYTE.to_bytes(1, 'big'):
+        if d == ESCAPE_BYTE.to_bytes(1, 'big'):
+            d = dev.read()
+        in_progress = in_progress + d
+
+        bytes_left = bytes_left - 1
+        if bytes_left == 0:
+            bytes_left = 999
             parsed_message = parse_message(in_progress)
+            print(parsed_message)
             if parsed_message["type"] == "receive":
-                waiting_message = parsed_message
+                received.put(parsed_message)
             elif parsed_message["type"] == "AT" and parsed_message["command"] != "DB":
                 pass
                 # print("Received command message: " + parsed_message["command"] + ", " + parsed_message["payload"])
             elif parsed_message["type"] == "AT" and parsed_message["command"] == "DB":
-                waiting_message["rssi"] = int.from_bytes(parsed_message["payload"], byteorder='big')
-                incoming.put(waiting_message)
-                print("Received message: " + str(waiting_message))
+                waiting_neighbor["rssi"] = int.from_bytes(parsed_message["payload"], byteorder='big')
+                print("Found neighbor: " + str(waiting_neighbor))
+            elif parsed_message["type"] == "REMOTE_AT":
+                waiting_neighbor = parsed_message
             in_progress = b''
         else:
-            in_progress = in_progress + d
-            if len(in_progress) == 3 and in_progress[2] == RECEIVE_BYTE:
+            if len(in_progress) == 3:
+                bytes_left = int.from_bytes(in_progress[1:3], 'big') + 1
+            elif len(in_progress) == 4 and in_progress[3] == REMOTE_AT_RESP_BYTE:
                 send_at_command(dev, 'DB')
 
 
-if __name__ == "__main__":
+def choose_device():
     zigbee_devices = get_zigbee_ports()
     if len(zigbee_devices) == 0:
         raise Exception("No Zigbee sensors connected.")
@@ -135,24 +164,45 @@ if __name__ == "__main__":
         resp = input("Select a device: ")
         dnum = int(resp) if resp.isnumeric() else -1
 
-    dev_path = zigbee_devices[0]
+    return zigbee_devices[dnum]
+
+
+dev_path_to_name = {
+    "/dev/ttyUSB0": "Lefty",
+    "/dev/ttyUSB1": "Topper",
+    "/dev/ttyUSB2": "Slidey"
+}
+
+if __name__ == "__main__":
+    dev_path = choose_device()
     port = Serial(dev_path, 9600)
 
-    set_name_and_pan(port, "test_device", "5555")
 
-    inbound = Queue()
-    outbound = Queue()
-    t = Thread(target=polling_thread, args=(port, inbound, outbound,))
+    received = Queue()
+    to_send = Queue()
+    t = Thread(target=polling_thread, args=(port, received, to_send,))
 
     t.start()
 
-    OTHER_ZIGBEE = b'\xc4\x7f'
+    set_name_and_pan(port, dev_path_to_name[dev_path], "5555")
+    send_at_command(port, "ID")
+
+
+    OTHER_ZIGBEE = b'\xFF\xFF'
     go = True
     while go:
         text = input("Enter a message:")
 
         go = text != ".quit"
-        if go:
+        if text == ".quit":
+            go = False
+        elif text == ".qual":
+            print("Requesting NI from all devices.")
+            send_remote_at_command(port, OTHER_ZIGBEE, 'NI')
+        else:
             send_transmission(port, OTHER_ZIGBEE, text)
 
     port.close()
+
+#TODO: broadcast remote AT command "NI", collect NI+16_addr+RSSI for neighbors
+# --- TODO: this also means detecting a remote AT response, send this to a list of "neighbors"
